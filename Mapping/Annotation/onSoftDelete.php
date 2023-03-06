@@ -2,6 +2,7 @@
 
 namespace Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation;
 
+use Attribute;
 use Doctrine\Common\Annotations\Annotation;
 
 /**
@@ -13,8 +14,15 @@ use Doctrine\Common\Annotations\Annotation;
  * @author Ruben Harms <info@rubenharms.nl>
  * @license MIT License (http://www.opensource.org/licenses/mit-license.php)
  */
-final class onSoftDelete extends Annotation
+#[Attribute(Attribute::TARGET_PROPERTY)]
+final class onSoftDelete // extends Annotation
 {
     /** @var string @Required */
     public $type;
+
+    public function __construct(
+        ?string $type = null
+    ) {
+        $this->type = $type;
+    }
 }
