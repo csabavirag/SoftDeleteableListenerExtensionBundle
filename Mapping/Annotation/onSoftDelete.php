@@ -19,10 +19,4 @@ final class onSoftDelete // extends Annotation
 {
     /** @var string @Required */
     public $type;
-
-    public function __construct(
-        ?string $type = null
-    ) {
-        $this->type = $type;
-    }
 }
