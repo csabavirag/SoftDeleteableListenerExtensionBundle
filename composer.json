@@ -8,7 +8,8 @@
     "keywords": ["soft-deleteable"],
     "require": {
         "php": ">=8.0",
-        "symfony/framework-bundle": "^5.0 || ^6.0"
+        "symfony/framework-bundle": "^5.0 || ^6.0",
+        "gedmo/doctrine-extensions": "^3.15"
     },
     "require-dev": {
         "symfony/console": "^5.0 || ^6.0"

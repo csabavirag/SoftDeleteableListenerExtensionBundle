@@ -7,7 +7,6 @@ use Doctrine\Common\Annotations\Reader;
 use Doctrine\Common\Proxy\Proxy;
 use Doctrine\Common\Util\ClassUtils;
 use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\Event\LifecycleEventArgs;
 use Doctrine\ORM\Mapping\Annotation;
 use Doctrine\ORM\Mapping\ClassMetadata;
 use Doctrine\ORM\Mapping\ManyToMany;
@@ -19,6 +18,8 @@ use Evence\Bundle\SoftDeleteableExtensionBundle\Exception\OnSoftDeleteUnknownTyp
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDelete;
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDeleteSuccessor;
 use Gedmo\Mapping\ExtensionMetadataFactory;
+use Gedmo\SoftDeleteable\Event\PostSoftDeleteEventArgs;
+use Gedmo\SoftDeleteable\Event\PreSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\SoftDeleteableListener as GedmoSoftDeleteableListener;
 use Symfony\Component\DependencyInjection\ContainerAwareTrait;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -46,15 +47,15 @@ class SoftDeleteListener
     }
 
     /**
-     * @param LifecycleEventArgs $args
+     * @param PreSoftDeleteEventArgs $args
      *
      * @throws OnSoftDeleteUnknownTypeException
      * @throws \Exception
      */
-    public function preSoftDelete(LifecycleEventArgs $args)
+    public function preSoftDelete(PreSoftDeleteEventArgs $args)
     {
-        $em = $args->getEntityManager();
-        $entity = $args->getEntity();
+        $em = $args->getObjectManager();
+        $entity = $args->getObject();
 
         $entityReflection = new \ReflectionObject($entity);
 
@@ -166,7 +167,7 @@ class SoftDeleteListener
      * @param \ReflectionProperty $property
      * @param ClassMetadata $meta
      * @param $softDelete
-     * @param LifecycleEventArgs $args
+     * @param PreSoftDeleteEventArgs $args
      * @param $config
      * @throws OnSoftDeleteUnknownTypeException
      */
@@ -176,7 +177,7 @@ class SoftDeleteListener
         \ReflectionProperty $property,
         ClassMetadata $meta,
         $softDelete,
-        LifecycleEventArgs $args,
+        PreSoftDeleteEventArgs $args,
         $config
     ) {
         if (strtoupper($onDelete->type) === 'SET NULL') {
@@ -196,7 +197,7 @@ class SoftDeleteListener
      * @param \ReflectionProperty $property
      * @param ClassMetadata $meta
      * @param $softDelete
-     * @param LifecycleEventArgs $args
+     * @param PreSoftDeleteEventArgs $args
      * @param $config
      */
     protected function processOnDeleteSetNullOperation(
@@ -205,17 +206,17 @@ class SoftDeleteListener
         \ReflectionProperty $property,
         ClassMetadata $meta,
         $softDelete,
-        LifecycleEventArgs $args,
+        PreSoftDeleteEventArgs $args,
         $config
     ) {
         $reflProp = $meta->getReflectionProperty($property->name);
         $oldValue = $reflProp->getValue($object);
 
         $reflProp->setValue($object, null);
-        $args->getEntityManager()->persist($object);
+        $args->getObjectManager()->persist($object);
 
-        $args->getEntityManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, null);
-        $args->getEntityManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
+        $args->getObjectManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, null);
+        $args->getObjectManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
             $property->name => array($oldValue, null),
         ));
     }
@@ -226,7 +227,7 @@ class SoftDeleteListener
      * @param \ReflectionProperty $property
      * @param ClassMetadata $meta
      * @param $softDelete
-     * @param LifecycleEventArgs $args
+     * @param PreSoftDeleteEventArgs $args
      * @param $config
      * @throws \Exception
      */
@@ -236,7 +237,7 @@ class SoftDeleteListener
         \ReflectionProperty $property,
         ClassMetadata $meta,
         $softDelete,
-        LifecycleEventArgs $args,
+        PreSoftDeleteEventArgs $args,
         $config
     ) {
         $reflProp = $meta->getReflectionProperty($property->name);
@@ -265,10 +266,10 @@ class SoftDeleteListener
 
         $newValue = $successors[0]->getValue($oldValue);
         $reflProp->setValue($object, $newValue);
-        $args->getEntityManager()->persist($object);
+        $args->getObjectManager()->persist($object);
 
-        $args->getEntityManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, $newValue);
-        $args->getEntityManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
+        $args->getObjectManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, $newValue);
+        $args->getObjectManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
             $property->name => array($oldValue, $newValue),
         ));
     }
@@ -279,7 +280,7 @@ class SoftDeleteListener
      * @param \ReflectionProperty $property
      * @param ClassMetadata $meta
      * @param $softDelete
-     * @param LifecycleEventArgs $args
+     * @param PreSoftDeleteEventArgs $args
      * @param $config
      */
     protected function processOnDeleteCascadeOperation(
@@ -288,13 +289,13 @@ class SoftDeleteListener
         \ReflectionProperty $property,
         ClassMetadata $meta,
         $softDelete,
-        LifecycleEventArgs $args,
+        PreSoftDeleteEventArgs $args,
         $config
     ) {
         if ($softDelete) {
-            $this->softDeleteCascade($args->getEntityManager(), $config, $object);
+            $this->softDeleteCascade($args->getObjectManager(), $config, $object);
         } else {
-            $args->getEntityManager()->remove($object);
+            $args->getObjectManager()->remove($object);
         }
     }
 
@@ -315,7 +316,7 @@ class SoftDeleteListener
         //trigger event to check next level
         $em->getEventManager()->dispatchEvent(
             GedmoSoftDeleteableListener::PRE_SOFT_DELETE,
-            new LifecycleEventArgs($object, $em)
+            new PreSoftDeleteEventArgs($object, $em)
         );
 
         $date = new \DateTime();
@@ -329,7 +330,7 @@ class SoftDeleteListener
 
         $em->getEventManager()->dispatchEvent(
             GedmoSoftDeleteableListener::POST_SOFT_DELETE,
-            new LifecycleEventArgs($object, $em)
+            new PostSoftDeleteEventArgs($object, $em)
         );
     }
 
