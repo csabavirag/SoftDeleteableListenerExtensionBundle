@@ -45,6 +45,19 @@ class SoftDeleteListener
         $this->reader = $reader;
     }
 
+    private function getSoftDeleteAttribute(\ReflectionProperty $property, string $className): ?onSoftDelete
+    {
+        $attributes = $property->getAttributes($className);
+        if (!empty($attributes)) {
+            $attribute = $attributes[0];
+            $arguments = $attribute->getArguments();
+
+            return new onSoftDelete($arguments);
+        }
+
+        return (new AnnotationReader())->getPropertyAnnotation($property, onSoftDelete::class);
+    }
+
     /**
      * @param LifecycleEventArgs $args
      *
@@ -62,7 +75,6 @@ class SoftDeleteListener
             ->getMetadataDriverImpl()
             ->getAllClassNames();
 
-        $reader = new AnnotationReader();
         foreach ($namespaces as $namespace) {
             $reflectionClass = new \ReflectionClass($namespace);
             if ($reflectionClass->isAbstract()) {
@@ -72,7 +84,7 @@ class SoftDeleteListener
             $meta = $em->getClassMetadata($namespace);
             foreach ($reflectionClass->getProperties() as $property) {
                 /** @var onSoftDelete $onDelete */
-                if ($onDelete = $reader->getPropertyAnnotation($property, onSoftDelete::class)) {
+                if ($onDelete = $this->getSoftDeleteAttribute($property, onSoftDelete::class)) {
                     $objects = null;
                     $manyToMany = null;
                     $manyToOne = null;
