@@ -18,5 +18,16 @@ use Doctrine\Common\Annotations\Annotation;
 final class onSoftDelete // extends Annotation
 {
     /** @var string @Required */
-    public $type;
+    public string $type;
+
+    public function __construct(mixed $type = null)
+    {
+        if (is_string($type)) {
+            $this->type = $type;
+        } elseif (!empty($type['type'])) {
+            $this->type = $type['type'];
+        } else {
+            $this->type = 'CASCADE';
+        }
+    }
 }
