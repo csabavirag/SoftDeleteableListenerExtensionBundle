@@ -37,7 +37,7 @@ class SoftDeleteListener
      */
     protected $reader;
 
-    public function __construct(Reader $reader)
+    public function __construct(?Reader $reader)
     {
         $this->reader = $reader;
     }
