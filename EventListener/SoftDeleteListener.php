@@ -37,7 +37,7 @@ class SoftDeleteListener
      */
     protected $reader;
 
-    public function __construct(Reader $reader)
+    public function __construct(?Reader $reader)
     {
         $this->reader = $reader;
     }
@@ -158,10 +158,21 @@ class SoftDeleteListener
 
                     if ($objects) {
                         $reflectionClass = new \ReflectionClass($namespace);
-                        $classAnnotation = $this->reader->getClassAnnotation($reflectionClass, \Gedmo\Mapping\Annotation\SoftDeleteable::class);
-                        $softDelete = $classAnnotation instanceof \Gedmo\Mapping\Annotation\SoftDeleteable;
-                        foreach ($objects as $object) {
-                            $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $classAnnotation->fieldName]);
+                        if($this->reader){
+                            $classAnnotation = $this->reader->getClassAnnotation($reflectionClass, \Gedmo\Mapping\Annotation\SoftDeleteable::class);
+                            $softDelete = $classAnnotation instanceof \Gedmo\Mapping\Annotation\SoftDeleteable;
+                            foreach ($objects as $object) {
+                                $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $classAnnotation->fieldName]);
+                            }
+                        }else{
+                            $attributes = $reflectionClass->getAttributes(\Gedmo\Mapping\Annotation\SoftDeleteable::class);
+                            foreach ($attributes as $attribute) {
+                                $arguments = $attribute->getArguments();
+                                foreach ($objects as $object) {
+                                    $softDelete = \Gedmo\Mapping\Annotation\SoftDeleteable::class == $attribute->getName();
+                                    $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $arguments['fieldName']]);
+                                }
+                            }
                         }
                     }
                 }
