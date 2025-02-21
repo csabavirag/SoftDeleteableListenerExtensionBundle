@@ -18,6 +18,7 @@ use Evence\Bundle\SoftDeleteableExtensionBundle\Exception\OnSoftDeleteUnknownTyp
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDelete;
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDeleteSuccessor;
 use Gedmo\Mapping\ExtensionMetadataFactory;
+use Gedmo\Mapping\Driver\AttributeReader;
 use Gedmo\SoftDeleteable\Event\PostSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\Event\PreSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\SoftDeleteableListener as GedmoSoftDeleteableListener;
@@ -34,11 +35,14 @@ use Symfony\Component\PropertyAccess\PropertyAccess;
 class SoftDeleteListener
 {
     /**
-     * @var Reader
+     * @var ?Reader|?AttributeReader
      */
     protected $reader;
 
-    public function __construct(?Reader $reader)
+    /**
+     * @param ?Reader|?AttributeReader $reader
+     */
+    public function __construct($reader)
     {
         $this->reader = $reader;
     }
