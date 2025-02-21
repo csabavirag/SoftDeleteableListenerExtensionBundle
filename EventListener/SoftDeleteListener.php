@@ -21,7 +21,6 @@ use Gedmo\Mapping\ExtensionMetadataFactory;
 use Gedmo\SoftDeleteable\Event\PostSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\Event\PreSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\SoftDeleteableListener as GedmoSoftDeleteableListener;
-use Symfony\Component\DependencyInjection\ContainerAwareTrait;
 use Symfony\Component\PropertyAccess\PropertyAccess;
 
 /**
@@ -34,16 +33,27 @@ use Symfony\Component\PropertyAccess\PropertyAccess;
  */
 class SoftDeleteListener
 {
-    use ContainerAwareTrait;
-
     /**
      * @var Reader
      */
     protected $reader;
 
-    public function __construct(Reader $reader)
+    public function __construct(?Reader $reader)
     {
         $this->reader = $reader;
+    }
+
+    private function getSoftDeleteAttribute(\ReflectionProperty $property, string $className): ?onSoftDelete
+    {
+        $attributes = $property->getAttributes($className);
+        if (!empty($attributes)) {
+            $attribute = $attributes[0];
+            $arguments = $attribute->getArguments();
+
+            return new onSoftDelete($arguments);
+        }
+
+        return (new AnnotationReader())->getPropertyAnnotation($property, onSoftDelete::class);
     }
 
     /**
@@ -63,7 +73,6 @@ class SoftDeleteListener
             ->getMetadataDriverImpl()
             ->getAllClassNames();
 
-        $reader = new AnnotationReader();
         foreach ($namespaces as $namespace) {
             $reflectionClass = new \ReflectionClass($namespace);
             if ($reflectionClass->isAbstract()) {
@@ -73,7 +82,7 @@ class SoftDeleteListener
             $meta = $em->getClassMetadata($namespace);
             foreach ($reflectionClass->getProperties() as $property) {
                 /** @var onSoftDelete $onDelete */
-                if ($onDelete = $reader->getPropertyAnnotation($property, onSoftDelete::class)) {
+                if ($onDelete = $this->getSoftDeleteAttribute($property, onSoftDelete::class)) {
                     $objects = null;
                     $manyToMany = null;
                     $manyToOne = null;
@@ -150,10 +159,21 @@ class SoftDeleteListener
 
                     if ($objects) {
                         $reflectionClass = new \ReflectionClass($namespace);
-                        $classAnnotation = $this->reader->getClassAnnotation($reflectionClass, \Gedmo\Mapping\Annotation\SoftDeleteable::class);
-                        $softDelete = $classAnnotation instanceof \Gedmo\Mapping\Annotation\SoftDeleteable;
-                        foreach ($objects as $object) {
-                            $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $classAnnotation->fieldName]);
+                        if($this->reader){
+                            $classAnnotation = $this->reader->getClassAnnotation($reflectionClass, \Gedmo\Mapping\Annotation\SoftDeleteable::class);
+                            $softDelete = $classAnnotation instanceof \Gedmo\Mapping\Annotation\SoftDeleteable;
+                            foreach ($objects as $object) {
+                                $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $classAnnotation->fieldName]);
+                            }
+                        }else{
+                            $attributes = $reflectionClass->getAttributes(\Gedmo\Mapping\Annotation\SoftDeleteable::class);
+                            foreach ($attributes as $attribute) {
+                                $arguments = $attribute->getArguments();
+                                foreach ($objects as $object) {
+                                    $softDelete = \Gedmo\Mapping\Annotation\SoftDeleteable::class == $attribute->getName();
+                                    $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $arguments['fieldName']]);
+                                }
+                            }
                         }
                     }
                 }
