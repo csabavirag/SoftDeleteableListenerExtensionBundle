@@ -72,3 +72,25 @@ $bundles = array(
     new Evence\Bundle\SoftDeleteableExtensionBundle\EvenceSoftDeleteableExtensionBundle(),
 );
 ```
+
+**Configure with Attributes**
+Override the service configuration, otherwise Attributes are interfering with the annotation_reader service definition of `SoftDeleteListener`
+
+``` yaml
+# config/packages/stof_doctrine_extensions.yaml
+...
+services:
+    gedmo.mapping.driver.attribute:
+        class: Gedmo\Mapping\Driver\AttributeReader
+
+...
+# Decorate Evence\SoftDeleteableExtensionBundle SoftDeleteListener to use the AttributeReader
+
+    evence.softdeletale.listener.softdelete:
+        class: Evence\Bundle\SoftDeleteableExtensionBundle\EventListener\SoftDeleteListener
+        arguments:
+            - '@gedmo.mapping.driver.attribute'
+        tags:
+            - { name: doctrine.event_listener, event: 'preSoftDelete' }
+        public: true
+```
