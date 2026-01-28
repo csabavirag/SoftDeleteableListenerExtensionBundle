@@ -2,17 +2,15 @@
 
 namespace Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation;
 
-use Doctrine\Common\Annotations\Annotation;
+use Attribute;
 
 /**
- * onSoftDeleteSuccessor annotation for onSoftDelete behavioral extension.
- *
- * @Annotation
- * @Target("PROPERTY")
+ * onSoftDeleteSuccessor attribute for onSoftDelete behavioral extension.
  *
  * @author Ruben Harms <info@rubenharms.nl>
  * @license MIT License (http://www.opensource.org/licenses/mit-license.php)
  */
-final class onSoftDeleteSuccessor extends Annotation
+#[Attribute(Attribute::TARGET_PROPERTY)]
+final class onSoftDeleteSuccessor
 {
 }

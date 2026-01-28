@@ -1,12 +1,10 @@
 <?php
 
-use Symfony\Component\DependencyInjection\Definition;
-use Symfony\Component\DependencyInjection\Reference;
-use Symfony\Component\DependencyInjection\ContainerInterface;
+use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 
-/** @var \Symfony\Component\DependencyInjection\ContainerBuilder $container */
-$container->setDefinition('evence.softdeletale.listener.softdelete', new Definition('Evence\Bundle\SoftDeleteableExtensionBundle\EventListener\SoftDeleteListener', array(new Reference('annotation_reader', ContainerInterface::NULL_ON_INVALID_REFERENCE))))
+return static function (ContainerConfigurator $containerConfigurator): void {
+    $services = $containerConfigurator->services();
 
-->addTag('doctrine.event_listener', array(
-    'event' => 'preSoftDelete',
-));
+    $services->set(\Evence\Bundle\SoftDeleteableExtensionBundle\EventListener\SoftDeleteListener::class)
+        ->tag('doctrine.event_listener', ['event' => 'preSoftDelete']);
+};

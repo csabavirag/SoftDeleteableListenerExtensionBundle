@@ -2,23 +2,13 @@
 
 namespace Evence\Bundle\SoftDeleteableExtensionBundle\EventListener;
 
-use Doctrine\Common\Annotations\AnnotationReader;
-use Doctrine\Common\Annotations\Reader;
-use Doctrine\Common\Proxy\Proxy;
 use Doctrine\Common\Util\ClassUtils;
-use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\Mapping\Annotation;
-use Doctrine\ORM\Mapping\ClassMetadata;
-use Doctrine\ORM\Mapping\ManyToMany;
-use Doctrine\ORM\Mapping\ManyToOne;
-use Doctrine\ORM\Mapping\OneToMany;
-use Doctrine\ORM\Mapping\OneToOne;
+use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\ClassMetadataInfo;
+use Doctrine\Persistence\Proxy;
 use Evence\Bundle\SoftDeleteableExtensionBundle\Exception\OnSoftDeleteUnknownTypeException;
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDelete;
 use Evence\Bundle\SoftDeleteableExtensionBundle\Mapping\Annotation\onSoftDeleteSuccessor;
-use Gedmo\Mapping\ExtensionMetadataFactory;
-use Gedmo\Mapping\Driver\AttributeReader;
 use Gedmo\SoftDeleteable\Event\PostSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\Event\PreSoftDeleteEventArgs;
 use Gedmo\SoftDeleteable\SoftDeleteableListener as GedmoSoftDeleteableListener;
@@ -26,6 +16,7 @@ use Symfony\Component\PropertyAccess\PropertyAccess;
 
 /**
  * Soft delete listener class for onSoftDelete behaviour.
+ * Optimized for PHP 8.2+ with native attributes support.
  *
  * @author Ruben Harms <info@rubenharms.nl>
  *
@@ -35,30 +26,16 @@ use Symfony\Component\PropertyAccess\PropertyAccess;
 class SoftDeleteListener
 {
     /**
-     * @var ?Reader|?AttributeReader
+     * Cache for entity metadata to avoid repeated reflection operations.
+     * Structure: [entityClass => [propertyName => [onSoftDelete config, relationship config, isSoftDeletable, softDeleteFieldName]]]
      */
-    protected $reader;
+    private array $metadataCache = [];
 
     /**
-     * @param ?Reader|?AttributeReader $reader
+     * Cache for successor property metadata.
+     * Structure: [entityClass => propertyName]
      */
-    public function __construct($reader)
-    {
-        $this->reader = $reader;
-    }
-
-    private function getSoftDeleteAttribute(\ReflectionProperty $property, string $className): ?onSoftDelete
-    {
-        $attributes = $property->getAttributes($className);
-        if (!empty($attributes)) {
-            $attribute = $attributes[0];
-            $arguments = $attribute->getArguments();
-
-            return new onSoftDelete($arguments);
-        }
-
-        return (new AnnotationReader())->getPropertyAnnotation($property, onSoftDelete::class);
-    }
+    private array $successorCache = [];
 
     /**
      * @param PreSoftDeleteEventArgs $args
@@ -66,119 +43,71 @@ class SoftDeleteListener
      * @throws OnSoftDeleteUnknownTypeException
      * @throws \Exception
      */
-    public function preSoftDelete(PreSoftDeleteEventArgs $args)
+    public function preSoftDelete(PreSoftDeleteEventArgs $args): void
     {
+        /** @var EntityManagerInterface */
         $em = $args->getObjectManager();
         $entity = $args->getObject();
+        $entityClass = ClassUtils::getClass($entity);
 
-        $entityReflection = new \ReflectionObject($entity);
-
-        $namespaces = $em->getConfiguration()
+        // Get all entity classes that might reference this entity
+        $allClasses = $em->getConfiguration()
             ->getMetadataDriverImpl()
             ->getAllClassNames();
 
-        foreach ($namespaces as $namespace) {
-            $reflectionClass = new \ReflectionClass($namespace);
-            if ($reflectionClass->isAbstract()) {
+        foreach ($allClasses as $namespace) {
+            // Skip abstract classes
+            if (!$this->isConcreteClass($namespace)) {
                 continue;
             }
 
-            $meta = $em->getClassMetadata($namespace);
-            foreach ($reflectionClass->getProperties() as $property) {
-                /** @var onSoftDelete $onDelete */
-                if ($onDelete = $this->getSoftDeleteAttribute($property, onSoftDelete::class)) {
-                    $objects = null;
-                    $manyToMany = null;
-                    $manyToOne = null;
-                    $oneToOne = null;
+            // Get cached or build metadata for this entity class
+            $classMetadata = $this->getClassMetadata($em, $namespace);
 
-                    $associationMapping = null;
-                    if (array_key_exists($property->getName(), $meta->getAssociationMappings())) {
-                        $associationMapping = (object)$meta->getAssociationMapping($property->getName());
+            foreach ($classMetadata as $propertyName => $metadata) {
+                $onDelete = $metadata['onSoftDelete'];
+                $associationMapping = $metadata['associationMapping'];
+                
+                if (!$onDelete || !$associationMapping) {
+                    continue;
+                }
+
+                $objects = null;
+                $relationship = $associationMapping;
+
+                // Check if this property references the entity being soft-deleted
+                if ($this->isReferencingEntity($relationship, $entityClass, $entity, $namespace)) {
+                    if (!$this->isOnDeleteTypeSupported($onDelete, $relationship)) {
+                        throw new \Exception(sprintf(
+                            '%s is not supported for %s relationships',
+                            $onDelete->type,
+                            $this->getRelationshipTypeName($relationship)
+                        ));
                     }
 
-                    if (
-                        ($manyToMany = $associationMapping && $associationMapping->type == ClassMetadataInfo::MANY_TO_MANY ? $associationMapping : null) ||
-                        ($manyToOne = $associationMapping && $associationMapping->type == ClassMetadataInfo::MANY_TO_ONE ? $associationMapping : null) ||
-                        ($oneToOne = $associationMapping && $associationMapping->type == ClassMetadataInfo::ONE_TO_ONE ? $associationMapping : null)
-                    ) {
-                        /** @var OneToOne|OneToMany|ManyToMany $relationship */
-                        $relationship = $manyToOne ?: $manyToMany ?: $oneToOne;
-
-                        $ns = null;
-                        $nsOriginal = $relationship->targetEntity;
-                        $nsFromRelativeToAbsolute = $entityReflection->getNamespaceName().'\\'.$relationship->targetEntity;
-                        $nsFromRoot = '\\'.$relationship->targetEntity;
-                        if (class_exists($nsOriginal)){
-                            $ns = $nsOriginal;
-                        } elseif (class_exists($nsFromRoot)){
-                            $ns = $nsFromRoot;
-                        } elseif (class_exists($nsFromRelativeToAbsolute)){
-                            $ns = $nsFromRelativeToAbsolute;
-                        }
-
-                        if (!$this->isOnDeleteTypeSupported($onDelete, $relationship)) {
-                            throw new \Exception(sprintf('%s is not supported for %s relationships', $onDelete->type, get_class($relationship)));
-                        }
-
-                        if (($manyToOne || $oneToOne) && $ns && $entity instanceof $ns) {
-                            $objects = $em->getRepository($namespace)->findBy(array(
-                                $property->name => $entity,
-                            ));
-                        } elseif ($manyToMany) {
-                            // For ManyToMany relations, we only delete the relationship between
-                            // two entities. This can be done on both side of the relation.
-                            $allowMappedSide = get_class($entity) === $namespace;
-                            $allowInversedSide = ($ns && $entity instanceof $ns);
-                            if ($allowInversedSide) {
-                                $mtmRelations = $em->getRepository($namespace)->createQueryBuilder('entity')
-                                    ->innerJoin(sprintf('entity.%s', $property->name), 'mtm')
-                                    ->addSelect('mtm')
-                                    ->andWhere(sprintf(':entity MEMBER OF entity.%s', $property->name))
-                                    ->setParameter('entity', $entity)
-                                    ->getQuery()
-                                    ->getResult();
-
-                                foreach ($mtmRelations as $mtmRelation) {
-                                    try {
-                                        $propertyAccessor = PropertyAccess::createPropertyAccessor();
-                                        $collection = $propertyAccessor->getValue($mtmRelation, $property->name);
-                                        $collection->removeElement($entity);
-                                    } catch (\Exception $e) {
-                                        throw new \Exception(sprintf('No accessor found for %s in %s', $property->name, get_class($mtmRelation)));
-                                    }
-                                }
-                            } elseif ($allowMappedSide) {
-                                try {
-                                    $propertyAccessor = PropertyAccess::createPropertyAccessor();
-                                    $collection = $propertyAccessor->getValue($entity, $property->name);
-                                    $collection->clear();
-                                    continue;
-                                } catch (\Exception $e) {
-                                    throw new \Exception(sprintf('No accessor found for %s in %s', $property->name, get_class($entity)));
-                                }
-                            }
-                        }
+                    // Handle ManyToOne and OneToOne relationships
+                    if ($this->isManyToOneOrOneToOne($relationship)) {
+                        $objects = $em->getRepository($namespace)->findBy([
+                            $propertyName => $entity,
+                        ]);
                     }
+                    // Handle ManyToMany relationships
+                    elseif ($this->isManyToMany($relationship)) {
+                        $this->handleManyToManyRelationship($em, $namespace, $propertyName, $entity, $entityClass);
+                    }
+                }
 
-                    if ($objects) {
-                        $reflectionClass = new \ReflectionClass($namespace);
-                        if($this->reader){
-                            $classAnnotation = $this->reader->getClassAnnotation($reflectionClass, \Gedmo\Mapping\Annotation\SoftDeleteable::class);
-                            $softDelete = $classAnnotation instanceof \Gedmo\Mapping\Annotation\SoftDeleteable;
-                            foreach ($objects as $object) {
-                                $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $classAnnotation->fieldName]);
-                            }
-                        }else{
-                            $attributes = $reflectionClass->getAttributes(\Gedmo\Mapping\Annotation\SoftDeleteable::class);
-                            foreach ($attributes as $attribute) {
-                                $arguments = $attribute->getArguments();
-                                foreach ($objects as $object) {
-                                    $softDelete = \Gedmo\Mapping\Annotation\SoftDeleteable::class == $attribute->getName();
-                                    $this->processOnDeleteOperation($object, $onDelete, $property, $meta, $softDelete, $args, ['fieldName' => $arguments['fieldName']]);
-                                }
-                            }
-                        }
+                // Process the found objects
+                if ($objects) {
+                    foreach ($objects as $object) {
+                        $this->processOnDeleteOperation(
+                            $object,
+                            $onDelete,
+                            $propertyName,
+                            $metadata['isSoftDeletable'],
+                            $metadata['softDeleteFieldName'],
+                            $args
+                        );
                     }
                 }
             }
@@ -186,93 +115,68 @@ class SoftDeleteListener
     }
 
     /**
-     * @param $object
-     * @param onSoftDelete $onDelete
-     * @param \ReflectionProperty $property
-     * @param ClassMetadata $meta
-     * @param $softDelete
-     * @param PreSoftDeleteEventArgs $args
-     * @param $config
-     * @throws OnSoftDeleteUnknownTypeException
+     * Get or build metadata cache for a class.
      */
-    protected function processOnDeleteOperation(
-        $object,
-        onSoftDelete $onDelete,
-        \ReflectionProperty $property,
-        ClassMetadata $meta,
-        $softDelete,
-        PreSoftDeleteEventArgs $args,
-        $config
-    ) {
-        if (strtoupper($onDelete->type) === 'SET NULL') {
-            $this->processOnDeleteSetNullOperation($object, $onDelete, $property, $meta, $softDelete, $args, $config);
-        } elseif (strtoupper($onDelete->type) === 'CASCADE') {
-            $this->processOnDeleteCascadeOperation($object, $onDelete, $property, $meta, $softDelete, $args, $config);
-        } elseif (strtoupper($onDelete->type) === 'SUCCESSOR') {
-            $this->processOnDeleteSuccessorOperation($object, $onDelete, $property, $meta, $softDelete, $args, $config);
-        } else {
-            throw new OnSoftDeleteUnknownTypeException($onDelete->type);
+    private function getClassMetadata(EntityManagerInterface $em, string $className): array
+    {
+        if (isset($this->metadataCache[$className])) {
+            return $this->metadataCache[$className];
         }
+
+        $this->metadataCache[$className] = [];
+        $doctrineMetadata = $em->getClassMetadata($className);
+        $reflectionClass = $doctrineMetadata->getReflectionClass();
+
+        // Check if this class is soft deletable
+        $classAttributes = $reflectionClass->getAttributes(\Gedmo\Mapping\Annotation\SoftDeleteable::class);
+        $isSoftDeletable = !empty($classAttributes);
+        $softDeleteFieldName = $isSoftDeletable ? ($classAttributes[0]->getArguments()['fieldName'] ?? 'deletedAt') : null;
+
+        // Iterate through properties once and cache all metadata
+        foreach ($reflectionClass->getProperties() as $property) {
+            $propertyName = $property->getName();
+            
+            // Get onSoftDelete attribute
+            $onSoftDeleteAttrs = $property->getAttributes(onSoftDelete::class);
+            $onDelete = null;
+            if (!empty($onSoftDeleteAttrs)) {
+                $arguments = $onSoftDeleteAttrs[0]->getArguments();
+                $onDelete = new onSoftDelete($arguments);
+            }
+
+            // Get association mapping if exists
+            $associationMapping = null;
+            if ($doctrineMetadata->hasAssociation($propertyName)) {
+                $associationMapping = (object)$doctrineMetadata->getAssociationMapping($propertyName);
+            }
+
+            $this->metadataCache[$className][$propertyName] = [
+                'onSoftDelete' => $onDelete,
+                'associationMapping' => $associationMapping,
+                'isSoftDeletable' => $isSoftDeletable,
+                'softDeleteFieldName' => $softDeleteFieldName,
+            ];
+        }
+
+        return $this->metadataCache[$className];
     }
 
     /**
-     * @param $object
-     * @param onSoftDelete $onDelete
-     * @param \ReflectionProperty $property
-     * @param ClassMetadata $meta
-     * @param $softDelete
-     * @param PreSoftDeleteEventArgs $args
-     * @param $config
+     * Get successor property for a class (cached).
      */
-    protected function processOnDeleteSetNullOperation(
-        $object,
-        onSoftDelete $onDelete,
-        \ReflectionProperty $property,
-        ClassMetadata $meta,
-        $softDelete,
-        PreSoftDeleteEventArgs $args,
-        $config
-    ) {
-        $reflProp = $meta->getReflectionProperty($property->name);
-        $oldValue = $reflProp->getValue($object);
+    private function getSuccessorProperty(string $className): string
+    {
+        if (isset($this->successorCache[$className])) {
+            return $this->successorCache[$className];
+        }
 
-        $reflProp->setValue($object, null);
-        $args->getObjectManager()->persist($object);
-
-        $args->getObjectManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, null);
-        $args->getObjectManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
-            $property->name => array($oldValue, null),
-        ));
-    }
-
-    /**
-     * @param $object
-     * @param onSoftDelete $onDelete
-     * @param \ReflectionProperty $property
-     * @param ClassMetadata $meta
-     * @param $softDelete
-     * @param PreSoftDeleteEventArgs $args
-     * @param $config
-     * @throws \Exception
-     */
-    protected function processOnDeleteSuccessorOperation(
-        $object,
-        onSoftDelete $onDelete,
-        \ReflectionProperty $property,
-        ClassMetadata $meta,
-        $softDelete,
-        PreSoftDeleteEventArgs $args,
-        $config
-    ) {
-        $reflProp = $meta->getReflectionProperty($property->name);
-        $oldValue = $reflProp->getValue($object);
-
-        $reader = new AnnotationReader();
-        $reflectionClass = new \ReflectionClass(ClassUtils::getClass($oldValue));
+        $reflectionClass = new \ReflectionClass($className);
         $successors = [];
-        foreach ($reflectionClass->getProperties() as $propertyOfOldValueObject) {
-            if ($reader->getPropertyAnnotation($propertyOfOldValueObject, onSoftDeleteSuccessor::class)) {
-                $successors[] = $propertyOfOldValueObject;
+
+        foreach ($reflectionClass->getProperties() as $property) {
+            $attributes = $property->getAttributes(onSoftDeleteSuccessor::class);
+            if (!empty($attributes)) {
+                $successors[] = $property->getName();
             }
         }
 
@@ -282,62 +186,272 @@ class SoftDeleteListener
             throw new \Exception('One property of deleted entity must be marked as successor.');
         }
 
-        $successors[0]->setAccessible(true);
+        $this->successorCache[$className] = $successors[0];
+        return $successors[0];
+    }
 
+    /**
+     * Check if a class is concrete (not abstract).
+     */
+    private function isConcreteClass(string $className): bool
+    {
+        static $cache = [];
+        
+        if (!isset($cache[$className])) {
+            $cache[$className] = !(new \ReflectionClass($className))->isAbstract();
+        }
+        
+        return $cache[$className];
+    }
+
+    /**
+     * Check if a relationship is referencing the given entity.
+     */
+    private function isReferencingEntity($relationship, string $entityClass, object $entity, string $owningClass): bool
+    {
+        $targetEntity = $relationship->targetEntity;
+        
+        // Resolve target entity class name
+        $targetClass = $this->resolveTargetEntity($targetEntity, $owningClass);
+        
+        return $targetClass && is_a($entityClass, $targetClass, true);
+    }
+
+    /**
+     * Resolve target entity class name from various formats.
+     */
+    private function resolveTargetEntity(string $targetEntity, string $owningClass): ?string
+    {
+        static $cache = [];
+        $cacheKey = $targetEntity . '|' . $owningClass;
+        
+        if (isset($cache[$cacheKey])) {
+            return $cache[$cacheKey];
+        }
+
+        // Try as-is
+        if (class_exists($targetEntity)) {
+            return $cache[$cacheKey] = $targetEntity;
+        }
+
+        // Try with leading backslash
+        $withLeadingSlash = '\\' . ltrim($targetEntity, '\\');
+        if (class_exists($withLeadingSlash)) {
+            return $cache[$cacheKey] = $withLeadingSlash;
+        }
+
+        // Try relative to owning class namespace
+        $owningNamespace = (new \ReflectionClass($owningClass))->getNamespaceName();
+        $relativeClass = $owningNamespace . '\\' . $targetEntity;
+        if (class_exists($relativeClass)) {
+            return $cache[$cacheKey] = $relativeClass;
+        }
+
+        return $cache[$cacheKey] = null;
+    }
+
+    /**
+     * Check if relationship is ManyToOne or OneToOne.
+     */
+    private function isManyToOneOrOneToOne($relationship): bool
+    {
+        return in_array(
+            $relationship->type,
+            [ClassMetadataInfo::MANY_TO_ONE, ClassMetadataInfo::ONE_TO_ONE],
+            true
+        );
+    }
+
+    /**
+     * Check if relationship is ManyToMany.
+     */
+    private function isManyToMany($relationship): bool
+    {
+        return $relationship->type === ClassMetadataInfo::MANY_TO_MANY;
+    }
+
+    /**
+     * Get human-readable relationship type name.
+     */
+    private function getRelationshipTypeName($relationship): string
+    {
+        return match ($relationship->type) {
+            ClassMetadataInfo::MANY_TO_ONE => 'ManyToOne',
+            ClassMetadataInfo::ONE_TO_ONE => 'OneToOne',
+            ClassMetadataInfo::MANY_TO_MANY => 'ManyToMany',
+            ClassMetadataInfo::ONE_TO_MANY => 'OneToMany',
+            default => 'Unknown',
+        };
+    }
+
+    /**
+     * Handle ManyToMany relationship cleanup.
+     */
+    private function handleManyToManyRelationship(
+        EntityManagerInterface $em,
+        string $namespace,
+        string $propertyName,
+        object $entity,
+        string $entityClass
+    ): void {
+        $allowMappedSide = get_class($entity) === $namespace;
+        $allowInversedSide = is_a($entityClass, $namespace, true);
+
+        if ($allowInversedSide) {
+            $mtmRelations = $em->getRepository($namespace)
+                ->createQueryBuilder('entity')
+                ->innerJoin(sprintf('entity.%s', $propertyName), 'mtm')
+                ->addSelect('mtm')
+                ->andWhere(sprintf(':entity MEMBER OF entity.%s', $propertyName))
+                ->setParameter('entity', $entity)
+                ->getQuery()
+                ->getResult();
+
+            $propertyAccessor = PropertyAccess::createPropertyAccessor();
+            foreach ($mtmRelations as $mtmRelation) {
+                try {
+                    $collection = $propertyAccessor->getValue($mtmRelation, $propertyName);
+                    $collection->removeElement($entity);
+                } catch (\Exception $e) {
+                    throw new \Exception(sprintf(
+                        'No accessor found for %s in %s',
+                        $propertyName,
+                        get_class($mtmRelation)
+                    ));
+                }
+            }
+        } elseif ($allowMappedSide) {
+            $propertyAccessor = PropertyAccess::createPropertyAccessor();
+            try {
+                $collection = $propertyAccessor->getValue($entity, $propertyName);
+                $collection->clear();
+            } catch (\Exception $e) {
+                throw new \Exception(sprintf(
+                    'No accessor found for %s in %s',
+                    $propertyName,
+                    get_class($entity)
+                ));
+            }
+        }
+    }
+
+    /**
+     * Process the onDelete operation.
+     *
+     * @throws OnSoftDeleteUnknownTypeException
+     */
+    protected function processOnDeleteOperation(
+        object $object,
+        onSoftDelete $onDelete,
+        string $propertyName,
+        bool $isSoftDeletable,
+        ?string $softDeleteFieldName,
+        PreSoftDeleteEventArgs $args
+    ): void {
+        $type = strtoupper($onDelete->type);
+
+        match ($type) {
+            'SET NULL' => $this->processOnDeleteSetNullOperation($object, $propertyName, $args),
+            'CASCADE' => $this->processOnDeleteCascadeOperation($object, $isSoftDeletable, $softDeleteFieldName, $args),
+            'SUCCESSOR' => $this->processOnDeleteSuccessorOperation($object, $propertyName, $args),
+            default => throw new OnSoftDeleteUnknownTypeException($onDelete->type),
+        };
+    }
+
+    /**
+     * Process SET NULL operation.
+     */
+    protected function processOnDeleteSetNullOperation(
+        object $object,
+        string $propertyName,
+        PreSoftDeleteEventArgs $args
+    ): void {
+        $em = $args->getObjectManager();
+        $meta = $em->getClassMetadata(get_class($object));
+        $reflProp = $meta->getReflectionProperty($propertyName);
+        $oldValue = $reflProp->getValue($object);
+
+        $reflProp->setValue($object, null);
+        $em->persist($object);
+
+        $em->getUnitOfWork()->propertyChanged($object, $propertyName, $oldValue, null);
+        $em->getUnitOfWork()->scheduleExtraUpdate($object, [
+            $propertyName => [$oldValue, null],
+        ]);
+    }
+
+    /**
+     * Process SUCCESSOR operation.
+     */
+    protected function processOnDeleteSuccessorOperation(
+        object $object,
+        string $propertyName,
+        PreSoftDeleteEventArgs $args
+    ): void {
+        $em = $args->getObjectManager();
+        $meta = $em->getClassMetadata(get_class($object));
+        $reflProp = $meta->getReflectionProperty($propertyName);
+        $oldValue = $reflProp->getValue($object);
+
+        // Load proxy if needed
         if ($oldValue instanceof Proxy) {
             $oldValue->__load();
         }
 
-        $newValue = $successors[0]->getValue($oldValue);
-        $reflProp->setValue($object, $newValue);
-        $args->getObjectManager()->persist($object);
+        // Get successor property (cached)
+        $oldValueClass = ClassUtils::getClass($oldValue);
+        $successorPropertyName = $this->getSuccessorProperty($oldValueClass);
 
-        $args->getObjectManager()->getUnitOfWork()->propertyChanged($object, $property->name, $oldValue, $newValue);
-        $args->getObjectManager()->getUnitOfWork()->scheduleExtraUpdate($object, array(
-            $property->name => array($oldValue, $newValue),
-        ));
+        // Get new value from successor property
+        $successorMeta = $em->getClassMetadata($oldValueClass);
+        $successorReflProp = $successorMeta->getReflectionProperty($successorPropertyName);
+        $newValue = $successorReflProp->getValue($oldValue);
+
+        $reflProp->setValue($object, $newValue);
+        $em->persist($object);
+
+        $em->getUnitOfWork()->propertyChanged($object, $propertyName, $oldValue, $newValue);
+        $em->getUnitOfWork()->scheduleExtraUpdate($object, [
+            $propertyName => [$oldValue, $newValue],
+        ]);
     }
 
     /**
-     * @param $object
-     * @param onSoftDelete $onDelete
-     * @param \ReflectionProperty $property
-     * @param ClassMetadata $meta
-     * @param $softDelete
-     * @param PreSoftDeleteEventArgs $args
-     * @param $config
+     * Process CASCADE operation.
      */
     protected function processOnDeleteCascadeOperation(
-        $object,
-        onSoftDelete $onDelete,
-        \ReflectionProperty $property,
-        ClassMetadata $meta,
-        $softDelete,
-        PreSoftDeleteEventArgs $args,
-        $config
-    ) {
-        if ($softDelete) {
-            $this->softDeleteCascade($args->getObjectManager(), $config, $object);
+        object $object,
+        bool $isSoftDeletable,
+        ?string $softDeleteFieldName,
+        PreSoftDeleteEventArgs $args
+    ): void {
+        $em = $args->getObjectManager();
+
+        if ($isSoftDeletable && $softDeleteFieldName) {
+            $this->softDeleteCascade($em, $softDeleteFieldName, $object);
         } else {
-            $args->getObjectManager()->remove($object);
+            $em->remove($object);
         }
     }
 
     /**
-     * @param EntityManager $em
-     * @param $config
-     * @param $object
+     * Perform soft delete cascade.
      */
-    protected function softDeleteCascade($em, $config, $object)
-    {
+    protected function softDeleteCascade(
+        EntityManagerInterface $em,
+        string $fieldName,
+        object $object
+    ): void {
         $meta = $em->getClassMetadata(get_class($object));
-        $reflProp = $meta->getReflectionProperty($config['fieldName']);
+        $reflProp = $meta->getReflectionProperty($fieldName);
         $oldValue = $reflProp->getValue($object);
-        if ($oldValue instanceof \Datetime) {
+
+        // Skip if already soft deleted
+        if ($oldValue instanceof \DateTime) {
             return;
         }
 
-        //trigger event to check next level
+        // Trigger pre-soft-delete event to check next level
         $em->getEventManager()->dispatchEvent(
             GedmoSoftDeleteableListener::PRE_SOFT_DELETE,
             new PreSoftDeleteEventArgs($object, $em)
@@ -347,10 +461,10 @@ class SoftDeleteListener
         $reflProp->setValue($object, $date);
 
         $uow = $em->getUnitOfWork();
-        $uow->propertyChanged($object, $config['fieldName'], $oldValue, $date);
-        $uow->scheduleExtraUpdate($object, array(
-            $config['fieldName'] => array($oldValue, $date),
-        ));
+        $uow->propertyChanged($object, $fieldName, $oldValue, $date);
+        $uow->scheduleExtraUpdate($object, [
+            $fieldName => [$oldValue, $date],
+        ]);
 
         $em->getEventManager()->dispatchEvent(
             GedmoSoftDeleteableListener::POST_SOFT_DELETE,
@@ -359,16 +473,24 @@ class SoftDeleteListener
     }
 
     /**
-     * @param onSoftDelete $onDelete
-     * @param Annotation $relationship
-     * @return bool
+     * Check if onDelete type is supported for the relationship.
      */
-    protected function isOnDeleteTypeSupported(onSoftDelete $onDelete, $relationship)
+    protected function isOnDeleteTypeSupported(onSoftDelete $onDelete, $relationship): bool
     {
-        if (strtoupper($onDelete->type) === 'SET NULL' && ($relationship instanceof ManyToMany || (property_exists($relationship, 'type') && $relationship->type === ClassMetadataInfo::MANY_TO_MANY))) {
+        // SET NULL is not supported for ManyToMany relationships
+        if (strtoupper($onDelete->type) === 'SET NULL' && $this->isManyToMany($relationship)) {
             return false;
         }
 
         return true;
+    }
+
+    /**
+     * Clear the metadata cache (useful for testing or long-running processes).
+     */
+    public function clearCache(): void
+    {
+        $this->metadataCache = [];
+        $this->successorCache = [];
     }
 }
