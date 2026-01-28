@@ -61,7 +61,7 @@ class Advertisement
 composer require evence/soft-deleteable-extension-bundle
 ```
 
-Add the bundle to `app/AppKernel.php`:
+Make sure the bundle is registered:
 
 ``` php
 # config/bundles.php
